@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+import os
+import shutil
+from pathlib import Path
+import filecmp
+import subprocess
+
+VIDEO_EXTS = {
+    '.mp4', '.mkv', '.mov', '.avi', '.wmv',
+    '.flv', '.webm', '.mpeg', '.mpg', '.3gp',
+    '.mts', '.m2ts', '.rm', '.rmvb', '.vob'
+}
+
+def has_duplicate(src: Path, base_dir: Path) -> bool:
+    """Return True if any file under base_dir is identical to src."""
+    for root, _, files in os.walk(base_dir):
+        for f in files:
+            dst = Path(root) / f
+            try:
+                if src.samefile(dst):
+                    continue
+            except OSError:
+                pass
+            if filecmp.cmp(src, dst, shallow=False):
+                return True
+    return False
+
+def convert_video(src: Path, dst: Path) -> tuple[bool, str]:
+    """Convert src to ProRes 422 HQ with pcm_s16le audio while preserving timecode."""
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', str(src),
+        '-map_metadata', '0',
+        '-map', '0:v',
+        '-c:v', 'prores_ks',
+        '-profile:v', '3',
+        '-pix_fmt', 'yuv422p10le',
+        '-map', '0:a?',
+        '-c:a', 'pcm_s16le',
+        '-copyts',
+        str(dst)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return (result.returncode == 0, result.stderr)
+
+def main():
+    script_path = Path(__file__).resolve()
+    current_dir = script_path.parent
+    parent_dir = current_dir.parent
+
+    if os.name == 'nt':
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        mode.value |= 0x0004
+        kernel32.SetConsoleMode(handle, mode)
+
+    total_files = 0
+    for root, _, files in os.walk(current_dir):
+        for f in files:
+            if root == str(current_dir) and f == script_path.name:
+                continue
+            if f.startswith('.'):
+                continue
+            src = Path(root) / f
+            rel = src.relative_to(current_dir)
+            dst = parent_dir / rel
+
+            # Skip duplicates or already converted files
+            if has_duplicate(src, parent_dir):
+                continue
+            if src.suffix.lower() in VIDEO_EXTS:
+                dst_video = dst.with_suffix('.mov')
+                if dst_video.exists():
+                    continue
+            total_files += 1
+
+    processed = 0
+
+    for root, dirs, _ in os.walk(current_dir):
+        rel_root = Path(root).relative_to(current_dir)
+        target_root = parent_dir / rel_root
+        for d in dirs:
+            dir_target = target_root / d
+            if not dir_target.exists():
+                dir_target.mkdir(parents=True, exist_ok=True)
+
+    for root, _, files in os.walk(current_dir):
+        for f in files:
+            if root == str(current_dir) and f == script_path.name:
+                continue
+            if f.startswith('.'):
+                continue
+
+            src = Path(root) / f
+            rel = src.relative_to(current_dir)
+            dst = parent_dir / rel
+
+            if has_duplicate(src, parent_dir):
+                print(f"\033[31mConversion failed.\033[0m {src.name} was already found in {dst}")
+                continue
+
+            if src.suffix.lower() in VIDEO_EXTS:
+                dst_video = dst.with_suffix('.mov')
+                if dst_video.exists():
+                    print(f"\033[31mConversion failed.\033[0m {src.name} already converted to {dst_video.name}")
+                    continue
+                dst_video.parent.mkdir(parents=True, exist_ok=True)
+                print(f"\033[32m{processed}\033[0m out of \033[32m{total_files}\033[0m files converted.")
+                print(f"Processing {src.name} → {dst_video.name}.")
+                success, err_output = convert_video(src, dst_video)
+                if not success:
+                    print(f"\033[31mConversion failed.\033[0m {src.name} could not be processed by ffmpeg.")
+                    continue
+                processed += 1
+                lines = err_output.strip().splitlines()
+                if lines:
+                    print(lines[-1])
+                continue
+
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            processed += 1
+            print(f"\033[32m{processed}\033[0m out of \033[32m{total_files}\033[0m files converted.")
+            print(f"Processing {src.name}.")
+
+    print(f"\nDone: {processed} of {total_files} files handled.")
+
+if __name__ == "__main__":
+    main()
